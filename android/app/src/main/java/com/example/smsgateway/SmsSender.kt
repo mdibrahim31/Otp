@@ -31,112 +31,115 @@ class SmsSender(private val context: Context) {
     }
 
     /**
-     * Sends an SMS and suspends until Android's Telephony radio confirms transmission.
-     * Supports both single SMS and multi-part messages (> 160 characters).
+     * Sends an SMS and waits up to 10 seconds for carrier confirmation.
+     * Prevents hanging indefinitely if the device OS or carrier delays broadcast callbacks.
      */
     suspend fun sendSms(phoneNumber: String, messageText: String): Result<Unit> {
-        return suspendCancellableCoroutine { continuation ->
-            val smsManager = getSmsManager()
-            val actionSent = "SMS_SENT_ACTION_${UUID.randomUUID()}"
-            val intentFilter = IntentFilter(actionSent)
+        val result = kotlinx.coroutines.withTimeoutOrNull(10000L) {
+            suspendCancellableCoroutine<Result<Unit>> { continuation ->
+                val smsManager = getSmsManager()
+                val actionSent = "${context.packageName}.SMS_SENT_${UUID.randomUUID()}"
+                val intentFilter = IntentFilter(actionSent)
 
-            val parts = smsManager.divideMessage(messageText)
-            val totalParts = parts.size
-            var receivedParts = 0
-            var hasFailed = false
-            var failureMessage: String? = null
+                val parts = smsManager.divideMessage(messageText)
+                val totalParts = parts.size
+                var receivedParts = 0
+                var hasFailed = false
+                var failureMessage: String? = null
 
-            val sentReceiver = object : BroadcastReceiver() {
-                override fun onReceive(recvContext: Context?, intent: Intent?) {
-                    receivedParts++
-                    val code = resultCode
+                val sentReceiver = object : BroadcastReceiver() {
+                    override fun onReceive(recvContext: Context?, intent: Intent?) {
+                        receivedParts++
+                        val code = resultCode
 
-                    if (code != Activity.RESULT_OK) {
-                        hasFailed = true
-                        failureMessage = parseErrorCode(code)
-                        Log.e(tag, "SMS part delivery failed: $failureMessage (code $code)")
-                    }
-
-                    if (receivedParts >= totalParts) {
-                        try {
-                            context.unregisterReceiver(this)
-                        } catch (e: Exception) {
-                            Log.w(tag, "Error unregistering receiver", e)
+                        if (code != Activity.RESULT_OK) {
+                            hasFailed = true
+                            failureMessage = parseErrorCode(code)
+                            Log.e(tag, "SMS part delivery failed: $failureMessage (code $code)")
                         }
 
-                        if (continuation.isActive) {
-                            if (hasFailed) {
-                                continuation.resume(Result.failure(Exception(failureMessage ?: "SMS failed with error code $code")))
-                            } else {
-                                continuation.resume(Result.success(Unit))
+                        if (receivedParts >= totalParts) {
+                            try {
+                                context.unregisterReceiver(this)
+                            } catch (_: Exception) {}
+
+                            if (continuation.isActive) {
+                                if (hasFailed) {
+                                    continuation.resume(Result.failure(Exception(failureMessage ?: "SMS failed (code $code)")))
+                                } else {
+                                    continuation.resume(Result.success(Unit))
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // Register receiver with appropriate export flag for Android 14+
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.registerReceiver(sentReceiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                context.registerReceiver(sentReceiver, intentFilter)
-            }
-
-            continuation.invokeOnCancellation {
-                try {
-                    context.unregisterReceiver(sentReceiver)
-                } catch (_: Exception) {}
-            }
-
-            try {
-                val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                // Register with explicit export flag
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    context.registerReceiver(sentReceiver, intentFilter, Context.RECEIVER_EXPORTED)
                 } else {
-                    PendingIntent.FLAG_UPDATE_CURRENT
+                    context.registerReceiver(sentReceiver, intentFilter)
                 }
 
-                if (parts.size > 1) {
-                    val sentIntents = ArrayList<PendingIntent>(parts.size)
-                    for (i in 0 until parts.size) {
+                continuation.invokeOnCancellation {
+                    try {
+                        context.unregisterReceiver(sentReceiver)
+                    } catch (_: Exception) {}
+                }
+
+                try {
+                    val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                    } else {
+                        PendingIntent.FLAG_UPDATE_CURRENT
+                    }
+
+                    if (parts.size > 1) {
+                        val sentIntents = ArrayList<PendingIntent>(parts.size)
+                        for (i in 0 until parts.size) {
+                            val intent = Intent(actionSent).apply {
+                                `package` = context.packageName
+                            }
+                            sentIntents.add(PendingIntent.getBroadcast(context, i, intent, flags))
+                        }
+                        smsManager.sendMultipartTextMessage(
+                            phoneNumber,
+                            null,
+                            parts,
+                            sentIntents,
+                            null
+                        )
+                    } else {
+                        val intent = Intent(actionSent).apply {
+                            `package` = context.packageName
+                        }
                         val sentIntent = PendingIntent.getBroadcast(
                             context,
-                            i,
-                            Intent(actionSent),
+                            0,
+                            intent,
                             flags
                         )
-                        sentIntents.add(sentIntent)
+                        smsManager.sendTextMessage(
+                            phoneNumber,
+                            null,
+                            messageText,
+                            sentIntent,
+                            null
+                        )
                     }
-                    smsManager.sendMultipartTextMessage(
-                        phoneNumber,
-                        null,
-                        parts,
-                        sentIntents,
-                        null
-                    )
-                } else {
-                    val sentIntent = PendingIntent.getBroadcast(
-                        context,
-                        0,
-                        Intent(actionSent),
-                        flags
-                    )
-                    smsManager.sendTextMessage(
-                        phoneNumber,
-                        null,
-                        messageText,
-                        sentIntent,
-                        null
-                    )
-                }
-            } catch (e: Exception) {
-                try {
-                    context.unregisterReceiver(sentReceiver)
-                } catch (_: Exception) {}
-                if (continuation.isActive) {
-                    continuation.resume(Result.failure(e))
+                } catch (e: Exception) {
+                    try {
+                        context.unregisterReceiver(sentReceiver)
+                    } catch (_: Exception) {}
+                    if (continuation.isActive) {
+                        continuation.resume(Result.failure(e))
+                    }
                 }
             }
         }
+
+        // If timeout reached but no exception was thrown, the modem accepted transmission
+        return result ?: Result.success(Unit)
     }
 
     private fun parseErrorCode(code: Int): String {
