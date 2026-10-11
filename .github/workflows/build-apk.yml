@@ -21,11 +21,13 @@ jobs:
 
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: '8.5'
 
     - name: Build Debug APK
       run: |
         cd android
-        gradle assembleDebug
+        gradle assembleDebug --no-daemon
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL || 'https://your-project.supabase.co' }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY || 'your-key' }}
