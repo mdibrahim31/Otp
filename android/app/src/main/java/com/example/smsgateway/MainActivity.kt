@@ -313,7 +313,7 @@ fun SmsGatewayDashboard() {
                         .background(Color(0xFF131D2E)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterVertically) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(
                             imageVector = Icons.Default.AllInbox,
                             contentDescription = null,
