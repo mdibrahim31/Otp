@@ -11,8 +11,14 @@ data class OutboundSms(
     @SerialName("phone_number")
     val phoneNumber: String,
     
+    @SerialName("otp")
+    val otp: String? = null,
+    
     @SerialName("message")
-    val message: String,
+    val message: String? = null,
+    
+    @SerialName("expires_at")
+    val expiresAt: String? = null,
     
     @SerialName("status")
     val status: String = STATUS_PENDING,
@@ -26,6 +32,17 @@ data class OutboundSms(
     @SerialName("sent_at")
     val sentAt: String? = null
 ) {
+    /**
+     * Resolves the actual text to send: uses the message column or generates from OTP
+     */
+    fun getResolvedMessage(): String {
+        return when {
+            !message.isNullOrBlank() -> message
+            !otp.isNullOrBlank() -> "Your OTP verification code is $otp. Valid for 5 minutes."
+            else -> "Your verification code has been generated."
+        }
+    }
+
     companion object {
         const val STATUS_PENDING = "PENDING"
         const val STATUS_PROCESSING = "PROCESSING"
@@ -52,5 +69,6 @@ data class GatewayLogEntry(
     val phoneNumber: String,
     val previewMessage: String,
     val status: String,
+    val otp: String? = null,
     val detail: String? = null
 )

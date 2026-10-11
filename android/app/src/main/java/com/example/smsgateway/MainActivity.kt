@@ -327,7 +327,7 @@ fun SmsGatewayDashboard() {
                             fontSize = 14.sp
                         )
                         Text(
-                            "Insert a row with status='PENDING' into 'outbound_sms'",
+                            "Insert a row with status='PENDING' into 'otp_sender'",
                             color = Color(0xFF475569),
                             fontSize = 12.sp
                         )
@@ -382,6 +382,21 @@ fun LogItemRow(entry: GatewayLogEntry) {
                         fontSize = 14.sp,
                         color = Color.White
                     )
+                    if (entry.otp != null) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            color = Color(0xFF0369A1),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                text = "OTP ${entry.otp}",
+                                color = Color(0xFFE0F2FE),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         timeStr,

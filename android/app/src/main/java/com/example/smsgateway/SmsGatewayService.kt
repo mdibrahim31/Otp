@@ -144,7 +144,7 @@ class SmsGatewayService : Service() {
                 addLog(GatewayLogEntry(
                     id = "SYS-CONN",
                     phoneNumber = "SYSTEM",
-                    previewMessage = "Connected to Supabase table 'outbound_sms'",
+                    previewMessage = "Connected to Supabase table 'otp_sender'",
                     status = "CONNECTED"
                 ))
             } else {
@@ -200,12 +200,13 @@ class SmsGatewayService : Service() {
         // Step A: Mark as PROCESSING to prevent duplicate processing
         supabaseRepository.updateSmsStatus(sms.id, OutboundSms.STATUS_PROCESSING)
 
-        Log.i(tag, "Dispatching SMS ${sms.id} to ${sms.phoneNumber}")
+        val textToSend = sms.getResolvedMessage()
+        Log.i(tag, "Dispatching SMS ${sms.id} (OTP: ${sms.otp ?: "N/A"}) to ${sms.phoneNumber}")
         
         // Step B: Send via Android SmsManager
         val sendResult = smsSender.sendSms(
             phoneNumber = sms.phoneNumber,
-            messageText = sms.message
+            messageText = textToSend
         )
 
         if (sendResult.isSuccess) {
@@ -215,8 +216,9 @@ class SmsGatewayService : Service() {
             addLog(GatewayLogEntry(
                 id = sms.id,
                 phoneNumber = sms.phoneNumber,
-                previewMessage = sms.message.take(60),
+                previewMessage = textToSend.take(60),
                 status = OutboundSms.STATUS_SENT,
+                otp = sms.otp,
                 detail = "Delivered to cellular network"
             ))
         } else {
@@ -231,8 +233,9 @@ class SmsGatewayService : Service() {
             addLog(GatewayLogEntry(
                 id = sms.id,
                 phoneNumber = sms.phoneNumber,
-                previewMessage = sms.message.take(60),
+                previewMessage = textToSend.take(60),
                 status = OutboundSms.STATUS_FAILED,
+                otp = sms.otp,
                 detail = errorMsg
             ))
         }

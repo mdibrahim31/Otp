@@ -692,7 +692,7 @@ class SupabaseRepository(
         install(Realtime)
     }
 
-    private val tableName = "outbound_sms"
+    private val tableName = "otp_sender"
 
     suspend fun fetchPendingMessages(limit: Long = 10): List<OutboundSms> {
         return client.postgrest[tableName]
@@ -737,7 +737,7 @@ class SupabaseRepository(
       path: 'app/src/main/java/com/example/smsgateway/model/OutboundSms.kt',
       name: 'OutboundSms.kt',
       language: 'kotlin',
-      description: 'Data classes matching Supabase table schema (id, phone_number, message, status).',
+      description: 'Data classes matching Supabase table schema (id, phone_number, otp, message, expires_at, status).',
       content: `package com.example.smsgateway.model
 
 import kotlinx.serialization.SerialName
@@ -751,8 +751,14 @@ data class OutboundSms(
     @SerialName("phone_number")
     val phoneNumber: String,
     
+    @SerialName("otp")
+    val otp: String? = null,
+    
     @SerialName("message")
-    val message: String,
+    val message: String? = null,
+    
+    @SerialName("expires_at")
+    val expiresAt: String? = null,
     
     @SerialName("status")
     val status: String = STATUS_PENDING,
@@ -766,6 +772,14 @@ data class OutboundSms(
     @SerialName("sent_at")
     val sentAt: String? = null
 ) {
+    fun getResolvedMessage(): String {
+        return when {
+            !message.isNullOrBlank() -> message
+            !otp.isNullOrBlank() -> "Your OTP verification code is $otp. Valid for 5 minutes."
+            else -> "Your verification code has been generated."
+        }
+    }
+
     companion object {
         const val STATUS_PENDING = "PENDING"
         const val STATUS_PROCESSING = "PROCESSING"
@@ -792,6 +806,7 @@ data class GatewayLogEntry(
     val phoneNumber: String,
     val previewMessage: String,
     val status: String,
+    val otp: String? = null,
     val detail: String? = null
 )`
     },
@@ -799,37 +814,95 @@ data class GatewayLogEntry(
       path: 'supabase_schema.sql',
       name: 'supabase_schema.sql',
       language: 'sql',
-      description: 'PostgreSQL table definition, check constraints, index, and Supabase Realtime publication.',
-      content: `-- 1. Table definition
-CREATE TABLE IF NOT EXISTS public.outbound_sms (
+      description: 'PostgreSQL table definition, auto-generating 6-digit OTP trigger, and 5-minute expiry column.',
+      content: `-- ==========================================================
+-- Supabase Schema for Otp_sender Table + Auto OTP Generator
+-- ==========================================================
+
+-- 1. Rename existing outbound_sms table to otp_sender (if it exists)
+DO $$ 
+BEGIN
+    IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'outbound_sms') 
+       AND NOT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'otp_sender') THEN
+        ALTER TABLE public.outbound_sms RENAME TO otp_sender;
+    END IF;
+END $$;
+
+-- 2. Create table otp_sender if not exists
+CREATE TABLE IF NOT EXISTS public.otp_sender (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     phone_number TEXT NOT NULL,
-    message TEXT NOT NULL,
+    otp TEXT,
+    message TEXT,
+    expires_at TIMESTAMPTZ DEFAULT (timezone('utc'::text, now()) + interval '5 minutes'),
     status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'SENT', 'FAILED')),
     error_message TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
     sent_at TIMESTAMPTZ
 );
 
--- 2. Fast queue index
-CREATE INDEX IF NOT EXISTS idx_outbound_sms_status_created 
-ON public.outbound_sms (status, created_at ASC);
+-- Upgrade columns if needed:
+ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS otp TEXT;
+ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ DEFAULT (timezone('utc'::text, now()) + interval '5 minutes');
+ALTER TABLE public.otp_sender ALTER COLUMN message DROP NOT NULL;
 
--- 3. Enable Supabase Realtime for instant notification
-ALTER PUBLICATION supabase_realtime ADD TABLE public.outbound_sms;
+-- 3. Trigger function to automatically generate 6-digit OTP, 5-minute expiry, and SMS message
+CREATE OR REPLACE FUNCTION generate_otp_sender_code()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.otp IS NULL OR NEW.otp = '' THEN
+        NEW.otp := lpad(floor(random() * (999999 - 100000 + 1) + 100000)::text, 6, '0');
+    END IF;
 
--- 4. Enable RLS & Gateway Access Policy
-ALTER TABLE public.outbound_sms ENABLE ROW LEVEL SECURITY;
+    IF NEW.expires_at IS NULL THEN
+        NEW.expires_at := timezone('utc'::text, now()) + interval '5 minutes';
+    END IF;
 
+    IF NEW.message IS NULL OR NEW.message = '' THEN
+        NEW.message := 'Your OTP verification code is ' || NEW.otp || '. Valid for 5 minutes.';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 4. Attach trigger before insert on otp_sender
+DROP TRIGGER IF EXISTS trg_generate_otp ON public.otp_sender;
+CREATE TRIGGER trg_generate_otp
+BEFORE INSERT ON public.otp_sender
+FOR EACH ROW
+EXECUTE FUNCTION generate_otp_sender_code();
+
+-- 5. Indexes for fast queue polling
+CREATE INDEX IF NOT EXISTS idx_otp_sender_status_created 
+ON public.otp_sender (status, created_at ASC);
+
+-- 6. Enable Realtime on otp_sender table (Safe check if already member)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_publication_tables 
+        WHERE pubname = 'supabase_realtime' 
+          AND schemaname = 'public' 
+          AND tablename = 'otp_sender'
+    ) THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.otp_sender;
+    END IF;
+END $$;
+
+-- 7. Enable Row Level Security (RLS)
+ALTER TABLE public.otp_sender ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow gateway full access" ON public.otp_sender;
 CREATE POLICY "Allow gateway full access" 
-ON public.outbound_sms
+ON public.otp_sender
 FOR ALL 
 USING (true)
 WITH CHECK (true);
 
--- 5. Test message trigger
-INSERT INTO public.outbound_sms (phone_number, message, status)
-VALUES ('+1234567890', 'Test message dispatched via Supabase Gateway', 'PENDING');`
+-- 8. Test Insertion into otp_sender
+INSERT INTO public.otp_sender (phone_number, status)
+VALUES ('+8801700000000', 'PENDING');`
     }
   ];
 
@@ -1046,7 +1119,7 @@ VALUES ('+1234567890', 'Test message dispatched via Supabase Gateway', 'PENDING'
         <div className="flex items-center gap-4 text-xs text-slate-400">
           <div className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span>Target Table: <code className="text-slate-300 font-mono">public.outbound_sms</code></span>
+            <span>Target Table: <code className="text-slate-300 font-mono">public.otp_sender</code></span>
           </div>
         </div>
       </div>

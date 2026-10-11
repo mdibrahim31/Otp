@@ -31,7 +31,7 @@ class SupabaseRepository(
         install(Realtime)
     }
 
-    private val tableName = "outbound_sms"
+    private val tableName = "otp_sender"
 
     /**
      * Test connection to Supabase database by attempting to query the table schema
