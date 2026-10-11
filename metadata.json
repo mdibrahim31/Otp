@@ -1,0 +1,6 @@
+{
+  "name": "Supabase Android SMS Gateway",
+  "description": "Complete Android Kotlin Outbound SMS Gateway application connected to Supabase database with foreground service, SmsManager, and live dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
