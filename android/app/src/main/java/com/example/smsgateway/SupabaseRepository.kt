@@ -54,7 +54,7 @@ class SupabaseRepository(
             client.postgrest[tableName]
                 .select {
                     filter {
-                        eq("status", OutboundSms.STATUS_PENDING)
+                        ilike("status", "pending")
                     }
                     order("created_at", io.github.jan.supabase.postgrest.query.Order.ASCENDING)
                     limit(limit)

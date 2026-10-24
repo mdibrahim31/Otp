@@ -8,8 +8,11 @@ data class OutboundSms(
     @SerialName("id")
     val id: String,
     
+    @SerialName("phone")
+    val phone: String? = null,
+
     @SerialName("phone_number")
-    val phoneNumber: String,
+    val phoneNumberAlt: String? = null,
     
     @SerialName("otp")
     val otp: String? = null,
@@ -21,7 +24,7 @@ data class OutboundSms(
     val expiresAt: String? = null,
     
     @SerialName("status")
-    val status: String = STATUS_PENDING,
+    val statusRaw: String = STATUS_PENDING,
     
     @SerialName("error_message")
     val errorMessage: String? = null,
@@ -30,8 +33,17 @@ data class OutboundSms(
     val createdAt: String? = null,
     
     @SerialName("sent_at")
-    val sentAt: String? = null
+    val sentAt: String? = null,
+
+    @SerialName("updated_at")
+    val updatedAt: String? = null
 ) {
+    val phoneNumber: String
+        get() = (if (!phone.isNullOrBlank()) phone else phoneNumberAlt) ?: ""
+
+    val isPending: Boolean
+        get() = statusRaw.equals("pending", ignoreCase = true)
+
     /**
      * Resolves the actual text to send: uses the message column or generates from OTP
      */
@@ -39,15 +51,15 @@ data class OutboundSms(
         return when {
             !message.isNullOrBlank() -> message
             !otp.isNullOrBlank() -> "Your OTP verification code is $otp. Valid for 5 minutes."
-            else -> "Your verification code has been generated."
+            else -> "Your OTP verification code is $otp."
         }
     }
 
     companion object {
-        const val STATUS_PENDING = "PENDING"
-        const val STATUS_PROCESSING = "PROCESSING"
-        const val STATUS_SENT = "SENT"
-        const val STATUS_FAILED = "FAILED"
+        const val STATUS_PENDING = "pending"
+        const val STATUS_PROCESSING = "processing"
+        const val STATUS_SENT = "sent"
+        const val STATUS_FAILED = "failed"
     }
 }
 
@@ -72,3 +84,4 @@ data class GatewayLogEntry(
     val otp: String? = null,
     val detail: String? = null
 )
+

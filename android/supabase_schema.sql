@@ -1,41 +1,60 @@
 -- ==========================================================
--- Supabase Schema for Otp_sender Table + Auto OTP Generator
+-- Supabase Schema for otp_sender Table + Auto OTP Generator
 -- ==========================================================
 
--- 1. Rename existing outbound_sms table to otp_sender (if it exists)
+-- 1. Create table otp_sender matching exact user specification
+CREATE TABLE IF NOT EXISTS public.otp_sender (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    phone VARCHAR(50) NOT NULL,
+    otp VARCHAR(10),
+    message TEXT,
+    status VARCHAR(20) DEFAULT 'pending',
+    error_message TEXT,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    sent_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Ensure 'phone' column exists if table was created previously with 'phone_number'
 DO $$ 
 BEGIN
-    IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'outbound_sms') 
-       AND NOT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'otp_sender') THEN
-        ALTER TABLE public.outbound_sms RENAME TO otp_sender;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+          AND table_name = 'otp_sender' 
+          AND column_name = 'phone_number'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+          AND table_name = 'otp_sender' 
+          AND column_name = 'phone'
+    ) THEN
+        ALTER TABLE public.otp_sender RENAME COLUMN phone_number TO phone;
     END IF;
 END $$;
 
--- 2. Create table otp_sender if not exists
-CREATE TABLE IF NOT EXISTS public.otp_sender (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    phone_number TEXT NOT NULL,
-    otp TEXT,
-    message TEXT,
-    expires_at TIMESTAMPTZ DEFAULT (timezone('utc'::text, now()) + interval '5 minutes'),
-    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'SENT', 'FAILED')),
-    error_message TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
-    sent_at TIMESTAMPTZ
-);
+-- Add any missing columns safely
+ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS phone VARCHAR(50);
+ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS otp VARCHAR(10);
+ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS message TEXT;
+ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'pending';
+ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS error_message TEXT;
+ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS sent_at TIMESTAMPTZ;
 
--- Upgrade columns if needed:
-ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS otp TEXT;
-ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ DEFAULT (timezone('utc'::text, now()) + interval '5 minutes');
-ALTER TABLE public.otp_sender ALTER COLUMN message DROP NOT NULL;
-
--- 3. Trigger function to automatically generate 6-digit OTP, 5-minute expiry, and SMS message
+-- 2. Trigger function to automatically generate 6-digit OTP, message text & expiry on raw INSERT
 CREATE OR REPLACE FUNCTION generate_otp_sender_code()
 RETURNS TRIGGER AS $$
 BEGIN
-    -- If OTP is not provided, generate a random 6-digit number (100000 to 999999)
+    -- Auto-generate random 6-digit OTP if not provided
     IF NEW.otp IS NULL OR NEW.otp = '' THEN
         NEW.otp := lpad(floor(random() * (999999 - 100000 + 1) + 100000)::text, 6, '0');
+    END IF;
+
+    -- Auto set default status to 'pending' if null
+    IF NEW.status IS NULL OR NEW.status = '' THEN
+        NEW.status := 'pending';
     END IF;
 
     -- Auto set 5-minute expiry time
@@ -43,7 +62,7 @@ BEGIN
         NEW.expires_at := timezone('utc'::text, now()) + interval '5 minutes';
     END IF;
 
-    -- If message is not provided, compose standard OTP SMS with 5-minute validity
+    -- If message is not provided, compose standard OTP SMS
     IF NEW.message IS NULL OR NEW.message = '' THEN
         NEW.message := 'Your OTP verification code is ' || NEW.otp || '. Valid for 5 minutes.';
     END IF;
@@ -52,18 +71,18 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- 4. Attach trigger before insert on otp_sender
+-- 3. Attach trigger before insert on otp_sender
 DROP TRIGGER IF EXISTS trg_generate_otp ON public.otp_sender;
 CREATE TRIGGER trg_generate_otp
 BEFORE INSERT ON public.otp_sender
 FOR EACH ROW
 EXECUTE FUNCTION generate_otp_sender_code();
 
--- 5. Indexes for fast queue polling
+-- 4. Indexes for fast queue polling by gateway
 CREATE INDEX IF NOT EXISTS idx_otp_sender_status_created 
 ON public.otp_sender (status, created_at ASC);
 
--- 6. Enable Realtime on otp_sender table (Safe check if already member)
+-- 5. Enable Realtime on otp_sender table for instant dispatch
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -76,7 +95,7 @@ BEGIN
     END IF;
 END $$;
 
--- 7. Enable Row Level Security (RLS)
+-- 6. Enable Row Level Security (RLS)
 ALTER TABLE public.otp_sender ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Allow gateway full access" ON public.otp_sender;
@@ -86,6 +105,5 @@ FOR ALL
 USING (true)
 WITH CHECK (true);
 
--- 8. Test Insertion into otp_sender
-INSERT INTO public.otp_sender (phone_number, status)
-VALUES ('+8801700000000', 'PENDING');
+-- 7. Test Insertion into otp_sender (Example raw insert)
+-- INSERT INTO public.otp_sender (phone, otp) VALUES ('+8801700000000', '849201');

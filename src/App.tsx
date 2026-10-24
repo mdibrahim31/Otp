@@ -697,7 +697,7 @@ class SupabaseRepository(
     suspend fun fetchPendingMessages(limit: Long = 10): List<OutboundSms> {
         return client.postgrest[tableName]
             .select {
-                filter { eq("status", OutboundSms.STATUS_PENDING) }
+                filter { ilike("status", "pending") }
                 order("created_at", io.github.jan.supabase.postgrest.query.Order.ASCENDING)
                 limit(limit)
             }
@@ -737,7 +737,7 @@ class SupabaseRepository(
       path: 'app/src/main/java/com/example/smsgateway/model/OutboundSms.kt',
       name: 'OutboundSms.kt',
       language: 'kotlin',
-      description: 'Data classes matching Supabase table schema (id, phone_number, otp, message, expires_at, status).',
+      description: 'Data classes matching Supabase table schema (id, phone, otp, message, status, expires_at).',
       content: `package com.example.smsgateway.model
 
 import kotlinx.serialization.SerialName
@@ -748,8 +748,11 @@ data class OutboundSms(
     @SerialName("id")
     val id: String,
     
+    @SerialName("phone")
+    val phone: String? = null,
+
     @SerialName("phone_number")
-    val phoneNumber: String,
+    val phoneNumberAlt: String? = null,
     
     @SerialName("otp")
     val otp: String? = null,
@@ -761,7 +764,7 @@ data class OutboundSms(
     val expiresAt: String? = null,
     
     @SerialName("status")
-    val status: String = STATUS_PENDING,
+    val statusRaw: String = STATUS_PENDING,
     
     @SerialName("error_message")
     val errorMessage: String? = null,
@@ -772,19 +775,25 @@ data class OutboundSms(
     @SerialName("sent_at")
     val sentAt: String? = null
 ) {
+    val phoneNumber: String
+        get() = (if (!phone.isNullOrBlank()) phone else phoneNumberAlt) ?: ""
+
+    val isPending: Boolean
+        get() = statusRaw.equals("pending", ignoreCase = true)
+
     fun getResolvedMessage(): String {
         return when {
             !message.isNullOrBlank() -> message
             !otp.isNullOrBlank() -> "Your OTP verification code is $otp. Valid for 5 minutes."
-            else -> "Your verification code has been generated."
+            else -> "Your OTP verification code is $otp."
         }
     }
 
     companion object {
-        const val STATUS_PENDING = "PENDING"
-        const val STATUS_PROCESSING = "PROCESSING"
-        const val STATUS_SENT = "SENT"
-        const val STATUS_FAILED = "FAILED"
+        const val STATUS_PENDING = "pending"
+        const val STATUS_PROCESSING = "processing"
+        const val STATUS_SENT = "sent"
+        const val STATUS_FAILED = "failed"
     }
 }
 
@@ -814,44 +823,35 @@ data class GatewayLogEntry(
       path: 'supabase_schema.sql',
       name: 'supabase_schema.sql',
       language: 'sql',
-      description: 'PostgreSQL table definition, auto-generating 6-digit OTP trigger, and 5-minute expiry column.',
+      description: 'Exact PostgreSQL table public.otp_sender, 6-digit OTP trigger, and Realtime activation.',
       content: `-- ==========================================================
--- Supabase Schema for Otp_sender Table + Auto OTP Generator
+-- Supabase Schema for otp_sender Table + Auto OTP Generator
 -- ==========================================================
 
--- 1. Rename existing outbound_sms table to otp_sender (if it exists)
-DO $$ 
-BEGIN
-    IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'outbound_sms') 
-       AND NOT EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'otp_sender') THEN
-        ALTER TABLE public.outbound_sms RENAME TO otp_sender;
-    END IF;
-END $$;
-
--- 2. Create table otp_sender if not exists
+-- 1. Create table otp_sender matching exact user specification
 CREATE TABLE IF NOT EXISTS public.otp_sender (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    phone_number TEXT NOT NULL,
-    otp TEXT,
+    phone VARCHAR(50) NOT NULL,
+    otp VARCHAR(10),
     message TEXT,
-    expires_at TIMESTAMPTZ DEFAULT (timezone('utc'::text, now()) + interval '5 minutes'),
-    status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'SENT', 'FAILED')),
+    status VARCHAR(20) DEFAULT 'pending',
     error_message TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
-    sent_at TIMESTAMPTZ
+    expires_at TIMESTAMP WITH TIME ZONE,
+    sent_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
--- Upgrade columns if needed:
-ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS otp TEXT;
-ALTER TABLE public.otp_sender ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ DEFAULT (timezone('utc'::text, now()) + interval '5 minutes');
-ALTER TABLE public.otp_sender ALTER COLUMN message DROP NOT NULL;
-
--- 3. Trigger function to automatically generate 6-digit OTP, 5-minute expiry, and SMS message
+-- 2. Trigger function to automatically generate 6-digit OTP & SMS message on raw INSERT
 CREATE OR REPLACE FUNCTION generate_otp_sender_code()
 RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.otp IS NULL OR NEW.otp = '' THEN
         NEW.otp := lpad(floor(random() * (999999 - 100000 + 1) + 100000)::text, 6, '0');
+    END IF;
+
+    IF NEW.status IS NULL OR NEW.status = '' THEN
+        NEW.status := 'pending';
     END IF;
 
     IF NEW.expires_at IS NULL THEN
@@ -866,18 +866,18 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- 4. Attach trigger before insert on otp_sender
+-- 3. Attach trigger before insert on otp_sender
 DROP TRIGGER IF EXISTS trg_generate_otp ON public.otp_sender;
 CREATE TRIGGER trg_generate_otp
 BEFORE INSERT ON public.otp_sender
 FOR EACH ROW
 EXECUTE FUNCTION generate_otp_sender_code();
 
--- 5. Indexes for fast queue polling
+-- 4. Indexes for fast queue polling
 CREATE INDEX IF NOT EXISTS idx_otp_sender_status_created 
 ON public.otp_sender (status, created_at ASC);
 
--- 6. Enable Realtime on otp_sender table (Safe check if already member)
+-- 5. Enable Realtime on otp_sender table
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -890,7 +890,7 @@ BEGIN
     END IF;
 END $$;
 
--- 7. Enable Row Level Security (RLS)
+-- 6. Enable Row Level Security (RLS)
 ALTER TABLE public.otp_sender ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Allow gateway full access" ON public.otp_sender;
@@ -900,9 +900,8 @@ FOR ALL
 USING (true)
 WITH CHECK (true);
 
--- 8. Test Insertion into otp_sender
-INSERT INTO public.otp_sender (phone_number, status)
-VALUES ('+8801700000000', 'PENDING');`
+-- 7. Test Raw Insertion into otp_sender
+-- INSERT INTO public.otp_sender (phone, otp) VALUES ('+8801700000000', '849201');`
     }
   ];
 
